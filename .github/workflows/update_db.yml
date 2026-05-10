@@ -38,7 +38,7 @@ jobs:
       - name: Check for changes
         id: verify_changed_files
         run: |
-          if git diff --quiet app_github/stock_data.db; then
+          if git diff --quiet stock_data.db; then
             echo "changed=false" >> $GITHUB_OUTPUT
           else
             echo "changed=true" >> $GITHUB_OUTPUT
@@ -47,7 +47,7 @@ jobs:
       - name: Commit and push changes
         if: steps.verify_changed_files.outputs.changed == 'true'
         run: |
-          git add app_github/stock_data.db
+          git add stock_data.db
           git commit -m "🤖 Auto-update stock database - $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push
       
