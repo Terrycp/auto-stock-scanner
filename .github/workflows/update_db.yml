@@ -2,11 +2,11 @@ name: Update Stock Database
 
 on:
   schedule:
-    # Run daily at 9:00 AM UTC (adjust time as needed)
-    - cron: '0 9 * * *'
+    # Run daily at 8:00 PM New York time (midnight UTC during EDT)
+    - cron: '0 0 * * *'
   # Allow manual trigger from GitHub Actions tab
   workflow_dispatch:
-  
+
 permissions:
   contents: write
 
