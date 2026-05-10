@@ -29,7 +29,6 @@ jobs:
       
       - name: Run stock data fetcher
         run: python fetch_data.py
-        working-directory: app_github
       
       - name: Configure git
         run: |
