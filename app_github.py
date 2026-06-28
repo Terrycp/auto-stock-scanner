@@ -1,6 +1,8 @@
 import time
 import json
 import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 import sqlite3
@@ -14,8 +16,21 @@ import ttkbootstrap as tb
 
 # --- Global Config ---
 current_df = pd.DataFrame()
-DB_NAME = "stock_data.db"
-SETTINGS_FILE = "app_settings.json"  # File to store user preferences
+
+
+def get_app_base_dir() -> Path:
+    """Return a writable directory for runtime files.
+
+    When launched from a PyInstaller one-file EXE, sys.executable points to the
+    real executable in dist/, so writing there keeps the DB/settings persistent.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+DB_NAME = str(get_app_base_dir() / "stock_data.db")
+SETTINGS_FILE = str(get_app_base_dir() / "app_settings.json")
 URL_LIST = [
     ("Bullish Catapult", "https://stockcharts.com/def/servlet/SC.scan?s=TSAL[t.t_eq_s]![as0,20,tv_gt_40000]![ya_eq_1]&report=predefall"),
     ("Quadruple Top Breakout", "https://stockcharts.com/def/servlet/SC.scan?s=TSAL[t.t_eq_s]![as0,20,tv_gt_40000]![yj_eq_1]&report=predefall"),
@@ -49,6 +64,9 @@ STANDARD_COLS = [
     "Daily MACD Line(12,26,9,Daily Close)",
     "Daily RSI(14,Daily Close)"
 ]
+# Hard-coded GitHub token. Replace the value below with your personal access token.
+# NOTE: Storing tokens in source code is insecure. Only hard-code for local/testing.
+GITHUB_TOKEN = "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"
 # --- Database Setup ---
 def add_column_if_not_exists(db_name, table_name, column_name, column_type):
     conn = sqlite3.connect(db_name)
@@ -82,41 +100,114 @@ def init_db():
         Date TEXT
     )
     """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS deleted_records (
+        FileName TEXT,
+        Symbol TEXT,
+        Date TEXT,
+        DeletedAt TEXT,
+        UNIQUE(FileName, Symbol, Date)
+    )
+    """)
     conn.commit()
     conn.close()
 
-def download_latest_db():
-    """Download latest stock_data.db from GitHub and replace local copy"""
+def download_latest_data():
+    """Download latest DB from GitHub and merge new symbols into existing local DB"""
+    if is_loading:
+        return
+
+    start_loading()
     try:
-        # Configure these with your GitHub repo details
-        GITHUB_OWNER = "Terrycp"  # TODO: Replace with your GitHub username
-        GITHUB_REPO = "auto-stock-scanner"  # TODO: Replace with your repository name
-        GITHUB_BRANCH = "main"  # or "master" depending on your default branch
+        init_db()
         
-        raw_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{DB_NAME}"
+        # Configure GitHub details
+        GITHUB_OWNER = "Terrycp"
+        GITHUB_REPO = "auto-stock-scanner"
+        GITHUB_BRANCH = "main"
+        db_filename = os.path.basename(DB_NAME)
         
-        print(f"Downloading latest database from GitHub...")
-        response = requests.get(raw_url, timeout=10)
+        # Download latest DB from GitHub
+        token = GITHUB_TOKEN
+        if token:
+            api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{db_filename}?ref={GITHUB_BRANCH}"
+            headers_req = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3.raw"}
+            print(f"Downloading latest database from GitHub (using token)...")
+            response = requests.get(api_url, headers=headers_req, timeout=15)
+        else:
+            raw_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/raw/{GITHUB_BRANCH}/{db_filename}"
+            print(f"Downloading latest database from GitHub (no token)...")
+            response = requests.get(raw_url, headers=HEADERS, timeout=15)
+        
         response.raise_for_status()
         
-        # Backup existing DB
-        if os.path.exists(DB_NAME):
-            backup_name = f"{DB_NAME}.backup"
-            if os.path.exists(backup_name):
-                os.remove(backup_name)
-            os.rename(DB_NAME, backup_name)
-            print(f"Backed up existing database to {backup_name}")
-        
-        # Write new DB
-        with open(DB_NAME, 'wb') as f:
+        # Save downloaded DB to temporary file
+        temp_db_path = f"{DB_NAME}.temp"
+        with open(temp_db_path, 'wb') as f:
             f.write(response.content)
-        print(f"✅ Downloaded latest database successfully")
-        return True
+        print(f"Downloaded database successfully")
+        
+        # Open connections to both local and GitHub DBs
+        local_conn = sqlite3.connect(DB_NAME)
+        github_conn = sqlite3.connect(temp_db_path)
+
+        try:
+            # Read all data from GitHub DB
+            github_df = pd.read_sql("SELECT * FROM stocks", github_conn)
+
+            # 🔑 FILTER NEW SYMBOLS ONLY - Compare and find new records
+            local_df = pd.read_sql("SELECT FileName, Symbol, Date FROM stocks", local_conn)
+            deleted_df = pd.read_sql("SELECT FileName, Symbol, Date FROM deleted_records", local_conn)
+            deleted_keys = set(zip(deleted_df["FileName"], deleted_df["Symbol"], deleted_df["Date"]))
+
+            if len(local_df) > 0:
+                local_keys = set(zip(local_df["FileName"], local_df["Symbol"], local_df["Date"]))
+                local_df["Date"] = pd.to_datetime(local_df["Date"], errors="coerce")
+                max_local_date = local_df["Date"].max()
+                if pd.notna(max_local_date):
+                    candidate_df = github_df[pd.to_datetime(github_df["Date"], errors="coerce") >= max_local_date].copy()
+                else:
+                    candidate_df = github_df.copy()
+
+                new_records = candidate_df[candidate_df.apply(
+                    lambda row: (row["FileName"], row["Symbol"], row["Date"]) not in local_keys
+                                and (row["FileName"], row["Symbol"], row["Date"]) not in deleted_keys,
+                    axis=1
+                )]
+            else:
+                # Local DB is empty, all records from GitHub are new unless locally deleted
+                new_records = github_df[github_df.apply(
+                    lambda row: (row["FileName"], row["Symbol"], row["Date"]) not in deleted_keys,
+                    axis=1
+                )]
+
+            if len(new_records) > 0:
+                # Ensure DB has all columns first
+                add_missing_columns_dynamic(new_records, "stocks")
+                # Insert only new records
+                new_records.to_sql("stocks", local_conn, if_exists="append", index=False)
+                print(f"✅ Inserted {len(new_records)} new records from GitHub")
+            else:
+                print("✅ No new records found - local DB is up to date")
+        finally:
+            github_conn.close()
+            local_conn.close()
+
+        # Clean up temp file
+        
+        # Clean up temp file
+        if os.path.exists(temp_db_path):
+            os.remove(temp_db_path)
+        
+        print(f"✅ Download & Merge complete!")
+        file_dropdown["values"] = get_file_names()
+        load_data()
         
     except Exception as e:
-        print(f"⚠️ Could not download database from GitHub: {e}")
-        print(f"Using local database instead")
-        return False
+        print(f"❌ Error downloading from GitHub: {e}")
+        messagebox.showerror("Error", f"Failed to download from GitHub: {e}")
+    
+    stop_loading()
 
 # --- Loading Function ---
 is_loading = False  # flag to prevent multiple clicks
@@ -219,7 +310,7 @@ def delete_selected_rows():
         messagebox.showwarning("No selection", "Please select one or more rows to delete.")
         return
 
-    if not messagebox.askyesno("Confirm Delete", "Delete selected rows from the database?"):
+    if not messagebox.askyesno("Confirm Delete", "Delete selected rows?"):
         return
 
     conn = sqlite3.connect(DB_NAME)
@@ -241,6 +332,10 @@ def delete_selected_rows():
         date_value = values[idx_date]
 
         cursor.execute(
+            "INSERT OR IGNORE INTO deleted_records (FileName, Symbol, Date, DeletedAt) VALUES (?, ?, ?, datetime('now'))",
+            (file_name, symbol, date_value)
+        )
+        cursor.execute(
             "DELETE FROM stocks WHERE FileName = ? AND Symbol = ? AND Date = ?",
             (file_name, symbol, date_value)
         )
@@ -251,98 +346,8 @@ def delete_selected_rows():
 
 
 def fetch_data():
-    if is_loading:
-        return
-
-    start_loading()
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    for _, link in URL_LIST:
-        time.sleep(1)
-        try:
-            resp = requests.get(link, headers=HEADERS)
-            resp.raise_for_status()
-
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            # --- Extract date from website ---
-            scan_name_tag = soup.find(class_="scan-name")
-            if scan_name_tag:
-                file_name = scan_name_tag.get_text(strip=True)
-            else:
-                file_name = "Unknown Scan"
-
-            date_tag = soup.find(id="table-date")
-            if date_tag:
-                raw_datetime = date_tag.get_text(strip=True)
-            else:
-                raw_datetime = None
-            
-            if raw_datetime:
-                try:
-                    parsed_date = datetime.strptime(raw_datetime, "%d %b %Y, %I:%M %p")
-                    formatted_date = parsed_date.strftime("%Y-%m-%d")
-                except Exception as e:
-                    print("Date parse error:", e)
-                    formatted_date = datetime.now().strftime("%Y-%m-%d")
-            else:
-                formatted_date = datetime.now().strftime("%Y-%m-%d")
-
-            table = soup.find("table", {"id": "sccDataTable"})
-            if not table:
-                continue
-            
-            df_new = pd.read_html(StringIO(str(table)))[0]
-            # Remove index column if exists
-            if df_new.columns[0].startswith("Unnamed"):
-                df_new = df_new.iloc[:, 1:]
-
-            # Rename columns safely (strip spaces)
-            df_new.columns = [col.strip() for col in df_new.columns]
-
-            # Ensure all expected columns exist, including the website-specific scan columns.
-            for col in STANDARD_COLS:
-                if col not in df_new.columns:
-                    df_new[col] = None
-
-            # Reorder strictly
-            df_new = df_new[STANDARD_COLS]
-
-            # Add missing columns (fill with None)
-            for col in STANDARD_COLS:
-                if col not in df_new.columns:
-                    df_new[col] = None
-
-            extra_cols = [col for col in df_new.columns if col not in STANDARD_COLS]
-            # AFTER df_new is fully prepared
-            df_new = df_new[STANDARD_COLS + extra_cols]
-            df_new["FileName"] = file_name
-            df_new["Date"] = formatted_date
-
-            df_old = pd.read_sql(
-                "SELECT Symbol FROM stocks WHERE FileName=? AND Date=?",
-                conn,
-                params=(file_name, formatted_date)
-            )
-
-            old_symbols = df_old["Symbol"]
-
-            new_symbols = df_new[~df_new["Symbol"].isin(old_symbols)]
-
-            # --- Ensure DB has all columns first ---
-            add_missing_columns_dynamic(new_symbols, "stocks")
-
-            # --- Insert only new data ---
-            new_symbols.to_sql("stocks", conn, if_exists="append", index=False)
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Error fetching {file_name}: {e}")
-    file_dropdown["values"] = get_file_names()
-    conn.close()
-    load_data()
-    stop_loading()
-    #messagebox.showinfo("Done", "✅ Fetch & Update complete!")
+    """Alias for download_latest_data - Fetch & Update Data button now uses the new merge logic"""
+    download_latest_data()
 
 # --- Load Data into Table ---
 def load_data():
@@ -528,7 +533,7 @@ def get_file_names():
 
 # --- Settings Persistence ---
 def load_settings():
-    """Load saved settings (column widths, window size, filters) from JSON file"""
+    """Load saved settings (column widths, window size, filters, github_token) from JSON file"""
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, 'r') as f:
@@ -538,7 +543,7 @@ def load_settings():
     return {}
 
 def save_settings():
-    """Save current settings (column widths, window size, filters) to JSON file"""
+    """Save current settings (column widths, window size, filters, GitHub token) to JSON file"""
     try:
         settings = {
             "window_geometry": root.geometry(),
@@ -582,6 +587,9 @@ def apply_saved_settings(settings):
     if "volume_min" in settings:
         volume_min.set(settings["volume_min"])
 
+# GitHub token UI removed — token should be provided via the GITHUB_TOKEN environment variable.
+
+
 def apply_column_widths(settings):
     """Apply saved column widths to the treeview"""
     if "column_widths" not in settings:
@@ -596,16 +604,14 @@ def apply_column_widths(settings):
                 print(f"Could not restore width for column {col}: {e}")
 
 
-# Try to download latest database from GitHub on startup
-download_latest_db()
-
+# Initialize database on startup
 init_db()
 
 # Load saved settings before creating UI
 saved_settings = load_settings()
 
 root = tb.Window(themename="superhero")
-root.title("📈 Stock Scanner UI")
+root.title("Stock Scanner")
 root.geometry("1150x650")
 
 # Set window close handler to save settings
@@ -626,7 +632,7 @@ frame_top.pack(fill="x", pady=10, padx=10)
 frame_buttons = ttk.Frame(frame_top)
 frame_buttons.pack(fill="x", pady=5)
 
-fetch_btn = ttk.Button(frame_buttons, text="🔄 Fetch & Update Data", command=fetch_data)
+fetch_btn = ttk.Button(frame_buttons, text="🔄 Update Data", command=fetch_data)
 fetch_btn.pack(side="left", padx=5)
 
 export_btn = ttk.Button(frame_buttons, text="💾 Export to Excel", command=export_excel)

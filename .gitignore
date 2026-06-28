@@ -1,0 +1,20 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller output
+build/
+dist/
+*.spec~
+*.log
+
+# Runtime-generated app files
+stock_data.db
+stock_data.db.backup
+stock_data.db.temp
+app_settings.json
+
+# Local environment
+.venv/
+venv/

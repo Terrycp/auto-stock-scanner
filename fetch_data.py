@@ -9,9 +9,10 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 from io import StringIO
+import os
 
 # --- Configuration ---
-DB_NAME = "stock_data.db"
+DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stock_data.db")
 URL_LIST = [
     ("Bullish Catapult", "https://stockcharts.com/def/servlet/SC.scan?s=TSAL[t.t_eq_s]![as0,20,tv_gt_40000]![ya_eq_1]&report=predefall"),
     ("Quadruple Top Breakout", "https://stockcharts.com/def/servlet/SC.scan?s=TSAL[t.t_eq_s]![as0,20,tv_gt_40000]![yj_eq_1]&report=predefall"),
