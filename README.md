@@ -1,6 +1,5 @@
 # Auto Stock Scanner
-
-A professional desktop application for scanning and analyzing stock market data. The app fetches stock data from multiple sources, stores results in a local SQLite database, and provides an intuitive interface for filtering, sorting, and exporting analysis.
+Built for a friend's personal investment workflow — automatically fetches and updates daily stock scan data so he can make informed trading decisions without manual data collection.
 
 ## About
 This project demonstrates full-stack desktop app development—from data fetching and database management to UI design and Windows packaging. Built with a focus on code organization, error handling, and user experience.
