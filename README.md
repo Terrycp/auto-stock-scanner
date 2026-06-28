@@ -41,7 +41,7 @@ python -m PyInstaller --onefile -w app_github.py
 ```
 
 ## Screenshots
-
+Main UI
 ![Main UI](screenshots/main-ui.png)
 
 ![Filters and Export](screenshots/filter-export.png)
